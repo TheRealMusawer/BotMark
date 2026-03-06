@@ -9,7 +9,7 @@ use pumpkin_protocol::java::packet_encoder::TCPNetworkEncoder;
 use pumpkin_protocol::java::server::config::SAcknowledgeFinishConfig;
 use pumpkin_protocol::java::server::handshake::SHandShake;
 use pumpkin_protocol::java::server::login::SLoginStart;
-use pumpkin_protocol::java::server::play::{SKeepAlive, SPlayerPosition, SPlayerRotation, SSwingArm};
+use pumpkin_protocol::java::server::play::{SKeepAlive, SPlayerPosition, SPlayerRotation, SSwingArm, SChatCommand, SChatMessage};
 use pumpkin_protocol::ser::NetworkWriteExt;
 use pumpkin_protocol::{ClientPacket, ConnectionState, MinecraftVersion};
 use pumpkin_util::math::vector3::Vector3;
@@ -80,8 +80,33 @@ impl Client {
         let _ = self.network_writer.lock().await.write_packet(buf.into()).await;
     }
 
+    /// Dashboard logic: Sends a command or chat message
+    pub async fn send_chat_or_cmd(&self, input: &str) {
+        if input.starts_with('/') {
+            let cmd = input.strip_prefix('/').unwrap_or(input);
+            self.send_packet(&SChatCommand {
+                command: cmd.to_string(),
+                timestamp: 0,
+                salt: 0,
+                argument_signatures: Vec::new(),
+                message_count: VarInt(0),
+                acknowledgments: vec![0u8; 3].into(), // Fixed-size bitset for 1.21.1
+            }).await;
+            log::info!("Executed Dashboard Command: /{}", cmd);
+        } else {
+            self.send_packet(&SChatMessage {
+                message: input.to_string(),
+                timestamp: 0,
+                salt: 0,
+                signature: None,
+                message_count: VarInt(0),
+                acknowledgments: vec![0u8; 3].into(),
+            }).await;
+            log::info!("Sent Dashboard Chat: {}", input);
+        }
+    }
+
     pub async fn join_server(&self, addr: SocketAddr, username: String) {
-        // 1. Handshake
         self.send_packet(&SHandShake {
             protocol_version: VarInt(CURRENT_MC_PROTOCOL as i32),
             server_address: addr.ip().to_string(),
@@ -90,7 +115,6 @@ impl Client {
         }).await;
         self.connection_state.store(ConnectionState::Login);
 
-        // 2. Login Start
         self.send_packet(&SLoginStart {
             name: username,
             uuid: Uuid::new_v4(),
@@ -118,10 +142,9 @@ impl Client {
                     }
                     ConnectionState::Play => {
                         if id == CKeepAlive::PACKET_ID.latest_id {
-                            // Automatically respond to server keep-alive
+                            // Respond with 0 to keep connection alive
                             self.send_packet(&SKeepAlive { keep_alive_id: 0 }).await;
                         } else if id == CPlayerPosition::PACKET_ID.latest_id {
-                            // Update internal coordinates on first spawn
                             if !self.is_loaded.load(Ordering::Relaxed) {
                                 self.is_loaded.store(true, Ordering::Relaxed);
                                 log::info!("Bot spawned into world.");
@@ -149,13 +172,13 @@ impl Client {
     async fn tick_movement(&self) {
         let progress = self.move_progress.load();
         if progress >= 1.0 {
-            if self.move_cooldown.fetch_sub(1, Ordering::Relaxed) == 0 {
+            if self.move_cooldown.fetch_sub(1, Ordering::Relaxed) <= 1 {
                 let cz = self.current_z.load();
                 self.start_z.store(cz);
-                let target = if (self.target_z.load() - cz).abs() < 0.1 { cz + 0.3 } else { cz - 0.3 };
+                let target = if (self.target_z.load() - cz).abs() < 0.1 { cz + 0.5 } else { cz - 0.5 };
                 self.target_z.store(target);
                 self.move_progress.store(0.0);
-                self.move_cooldown.store(rand::random_range(60..150), Ordering::Relaxed);
+                self.move_cooldown.store(100, Ordering::Relaxed);
             }
         } else {
             let np = (progress + 0.1).min(1.0);
@@ -170,31 +193,33 @@ impl Client {
         }
     }
 
+    async fn tick_swing(&self) {
+        if self.swing_cooldown.fetch_sub(1, Ordering::Relaxed) <= 1 {
+            self.send_packet(&SSwingArm { hand: VarInt(0) }).await;
+            self.swing_cooldown.store(40, Ordering::Relaxed);
+        }
+    }
+
     async fn tick_rotation(&self) {
         let progress = self.rotation_progress.load();
         if progress >= 1.0 {
-            if self.rotation_cooldown.fetch_sub(1, Ordering::Relaxed) == 0 {
+            if self.rotation_cooldown.fetch_sub(1, Ordering::Relaxed) <= 1 {
                 self.start_yaw.store(self.current_yaw.load());
-                self.target_yaw.store(rand::random_range(-180.0..180.0));
+                // Randomly rotate within a small range to simulate activity
+                self.target_yaw.store(self.current_yaw.load() + 10.0);
                 self.rotation_progress.store(0.0);
-                self.rotation_cooldown.store(rand::random_range(40..120), Ordering::Relaxed);
+                self.rotation_cooldown.store(200, Ordering::Relaxed);
             }
         } else {
             let np = (progress + 0.05).min(1.0);
             self.rotation_progress.store(np);
-            let t = 3.0 * np.powi(2) - 2.0 * np.powi(3);
-            let yaw = self.start_yaw.load() + (self.target_yaw.load() - self.start_yaw.load()) * t;
-            self.current_yaw.store(yaw);
-            self.send_packet(&SPlayerRotation { yaw, pitch: self.current_pitch.load(), ground: true }).await;
-        }
-    }
-
-    async fn tick_swing(&self) {
-        if self.swing_cooldown.fetch_sub(1, Ordering::Relaxed) == 0 {
-            if rand::random_bool(0.05) {
-                self.send_packet(&SSwingArm { hand: VarInt(0) }).await;
-                self.swing_cooldown.store(rand::random_range(20..80), Ordering::Relaxed);
-            }
+            let nyaw = self.start_yaw.load() + (self.target_yaw.load() - self.start_yaw.load()) * np;
+            self.current_yaw.store(nyaw);
+            self.send_packet(&SPlayerRotation {
+                yaw: nyaw,
+                pitch: self.current_pitch.load(),
+                collision: 1,
+            }).await;
         }
     }
 }
