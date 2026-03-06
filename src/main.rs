@@ -31,8 +31,8 @@ pub struct Args {
 async fn start_web_dashboard(bot: Arc<Client>) {
     let port = std::env::var("PORT").unwrap_or_else(|_| "10000".to_string());
     let addr = format!("0.0.0.0:{}", port);
-    let server = tiny_http::Server::http(&addr).unwrap();
-    log::info!("Dashboard active at http://0.0.0.0:{}", port);
+    let server = tiny_http::Server::http(&addr).expect("Failed to bind to port");
+    log::info!("Dashboard active on port {}", port);
     
     tokio::task::spawn_blocking(move || {
         for request in server.incoming_requests() {
@@ -45,13 +45,10 @@ async fn start_web_dashboard(bot: Arc<Client>) {
                     bot.set_afk(false);
                     "Anti-AFK Movement: DISABLED"
                 },
-                "/status" => {
-                    "Bot is online and connected."
-                },
-                _ => "Bot Dashboard. Use /move or /stop to control movement.",
+                "/status" => "Bot is online.",
+                _ => "Bot Dashboard. Use /move or /stop",
             };
-            let response = tiny_http::Response::from_string(response_text);
-            let _ = request.respond(response);
+            let _ = request.respond(tiny_http::Response::from_string(response_text));
         }
     });
 }
@@ -60,47 +57,53 @@ async fn start_web_dashboard(bot: Arc<Client>) {
 async fn main() {
     simple_logger::init_with_level(log::Level::Info).unwrap();
     let args = Arc::new(Args::parse());
-    let address = args.ip.parse::<SocketAddr>().expect("Invalid IP:Port. Use format 127.0.0.1:25565");
+    
+    let address = args.ip.parse::<SocketAddr>().expect("Invalid IP:Port");
 
     log::info!("Connecting to {}...", address);
     let stream = match timeout(Duration::from_millis(args.timeout), TcpStream::connect(address)).await {
         Ok(Ok(s)) => s,
-        Ok(Err(e)) => panic!("Connect Failed: {}", e),
-        Err(_) => panic!("Connect Timeout"),
+        Ok(Err(e)) => {
+            log::error!("Connection error: {}", e);
+            return;
+        }
+        Err(_) => {
+            log::error!("Connection timed out");
+            return;
+        }
     };
 
     let client = Arc::new(Client::new(stream));
     
-    // Start Web Dashboard for Render health checks and remote control
+    // Start Web Dashboard immediately for Render's health check
     start_web_dashboard(client.clone()).await;
 
-    // Join Server sequence
+    // Start the Login sequence
     client.join_server(address, "BotMark".to_string()).await;
 
-    let cloned_args = args.clone();
-    let bot = client.clone();
-    
-    let bot_task = tokio::spawn(async move {
-        let mut tick_interval = tokio::time::interval(Duration::from_millis(50));
+    let bot_reader = client.clone();
+    let reader_task = tokio::spawn(async move {
         loop {
-            tokio::select! {
-                // Process incoming packets (KeepAlive, Teleport, etc)
-                still_connected = bot.process_packets() => { 
-                    if !still_connected { 
-                        log::warn!("Disconnected from server.");
-                        break; 
-                    } 
-                }
-                // Handle Movement/Rotation/Swing ticks
-                _ = tick_interval.tick() => { 
-                    bot.tick(&cloned_args).await; 
-                }
+            if !bot_reader.process_packets().await {
+                log::warn!("Reader loop exited (Disconnected).");
+                break;
             }
         }
     });
 
-    // Wait for shutdown signal
-    tokio::signal::ctrl_c().await.unwrap();
-    log::info!("Shutting down...");
-    bot_task.abort();
+    let bot_ticker = client.clone();
+    let ticker_args = args.clone();
+    let ticker_task = tokio::spawn(async move {
+        let mut tick_interval = tokio::time::interval(Duration::from_millis(50));
+        loop {
+            tick_interval.tick().await;
+            bot_ticker.tick(&ticker_args).await;
+        }
+    });
+
+    // Keep main alive until Ctrl+C
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => log::info!("Shutdown signal received."),
+        _ = reader_task => log::error!("Reader task failed."),
+    }
 }
