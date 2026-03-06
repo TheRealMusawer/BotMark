@@ -28,14 +28,25 @@ pub struct Args {
     pub enable_swing: bool,
 }
 
-// Render needs a web port open or it will shut down the bot
-async fn start_web_server() {
+async fn start_web_dashboard(bot: Arc<Client>) {
     let port = std::env::var("PORT").unwrap_or_else(|_| "10000".to_string());
     let server = tiny_http::Server::http(format!("0.0.0.0:{}", port)).unwrap();
-    log::info!("Web server (keep-alive) listening on port {}", port);
+    log::info!("Dashboard active at http://your-app.onrender.com");
+    
     tokio::task::spawn_blocking(move || {
         for request in server.incoming_requests() {
-            let response = tiny_http::Response::from_string("Bot is Running");
+            let response_text = match request.url() {
+                "/move" => {
+                    bot.set_afk(true);
+                    "Anti-AFK Movement: ENABLED"
+                },
+                "/stop" => {
+                    bot.set_afk(false);
+                    "Anti-AFK Movement: DISABLED"
+                },
+                _ => "Bot Dashboard. Use /move or /stop to control movement.",
+            };
+            let response = tiny_http::Response::from_string(response_text);
             let _ = request.respond(response);
         }
     });
@@ -45,63 +56,31 @@ async fn start_web_server() {
 async fn main() {
     simple_logger::init_with_level(log::Level::Info).unwrap();
     let args = Arc::new(Args::parse());
-    let address = args.ip.parse::<SocketAddr>().expect("Invalid IP:Port format");
+    let address = args.ip.parse::<SocketAddr>().expect("Invalid IP:Port");
 
-    // 1. Keep-alive for Render
-    start_web_server().await;
-
-    log::info!("Connecting single bot to {}...", address);
-    
-    let timeout_dur = Duration::from_millis(args.timeout);
-    let stream_result = timeout(timeout_dur, TcpStream::connect(address)).await;
-
-    let stream = match stream_result {
-        Ok(Ok(s)) => s,
-        _ => {
-            log::error!("Failed to connect to {}", address);
-            return;
-        }
-    };
+    let stream = timeout(Duration::from_millis(args.timeout), TcpStream::connect(address))
+        .await.expect("Connect Timeout").expect("Connect Failed");
 
     let client = Arc::new(Client::new(stream));
     
-    // Connect as a single bot (Change name here)
-    client.join_server(address, "EaglerBot".to_string()).await;
+    // Start Web Dashboard for stealth control
+    start_web_dashboard(client.clone()).await;
+
+    client.join_server(address, "HelperBot".to_string()).await;
 
     let cloned_args = args.clone();
     let bot = client.clone();
-
-    // 2. Main Logic Loop
+    
     let bot_task = tokio::spawn(async move {
         let mut tick_interval = tokio::time::interval(Duration::from_millis(50));
-        let mut afk_interval = tokio::time::interval(Duration::from_secs(30));
-        
         loop {
             tokio::select! {
-                // Handle Chat & Commands
-                res = bot.process_packets() => {
-                    if !res { 
-                        log::warn!("Connection lost.");
-                        break; 
-                    }
-                }
-                // Anti-AFK (Move slightly every 30s)
-                _ = afk_interval.tick() => {
-                    log::info!("Anti-AFK Triggered: Moving...");
-                    // This triggers the rotation/swing logic in client.rs
-                    bot.tick(&cloned_args).await; 
-                }
-                // Standard Ticks
-                _ = tick_interval.tick() => {
-                    // Constant updates to keep connection alive
-                    bot.tick(&cloned_args).await;
-                }
+                res = bot.process_packets() => { if !res { break; } }
+                _ = tick_interval.tick() => { bot.tick(&cloned_args).await; }
             }
         }
     });
 
-    // Handle shutdown
     tokio::signal::ctrl_c().await.unwrap();
-    log::info!("Shutting down...");
     bot_task.abort();
 }
