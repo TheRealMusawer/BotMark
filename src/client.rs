@@ -22,8 +22,6 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::Args;
-
 pub struct Client {
     pub connection_state: AtomicCell<ConnectionState>,
     pub closed: AtomicBool,
@@ -66,7 +64,6 @@ impl Client {
         }
     }
 
-    /// Helper for dashboard status in main.rs
     pub fn afk_active_val(&self) -> bool {
         self.afk_active.load(Ordering::Relaxed)
     }
@@ -85,9 +82,7 @@ impl Client {
         let _ = self.network_writer.lock().await.write_packet(buf.into()).await;
     }
 
-    /// Processes commands or movement actions from the web dashboard
     pub async fn send_chat_or_cmd(&self, input: &str) {
-        // Direct WASD movement logic
         if input.starts_with("/move ") {
             let dir = input.strip_prefix("/move ").unwrap();
             let mut x = self.current_x.load();
@@ -108,7 +103,6 @@ impl Client {
             return;
         }
 
-        // Standard Chat or Commands
         if input.starts_with('/') {
             let cmd = input.strip_prefix('/').unwrap_or(input);
             self.send_packet(&SChatCommand {
@@ -119,7 +113,6 @@ impl Client {
                 message_count: VarInt(0),
                 acknowledgments: vec![0u8; 3].into(), 
             }).await;
-            log::info!("Dashboard CMD: /{}", cmd);
         } else {
             self.send_packet(&SChatMessage {
                 message: input.to_string(),
@@ -129,7 +122,6 @@ impl Client {
                 message_count: VarInt(0),
                 acknowledgments: vec![0u8; 3].into(),
             }).await;
-            log::info!("Dashboard Chat: {}", input);
         }
     }
 
@@ -138,14 +130,10 @@ impl Client {
             protocol_version: VarInt(CURRENT_MC_PROTOCOL as i32),
             server_address: addr.ip().to_string(),
             server_port: addr.port(),
-            next_state: VarInt(2), // Login
+            next_state: VarInt(2), 
         }).await;
         self.connection_state.store(ConnectionState::Login);
-
-        self.send_packet(&SLoginStart {
-            name: username,
-            uuid: Uuid::new_v4(),
-        }).await;
+        self.send_packet(&SLoginStart { name: username, uuid: Uuid::new_v4() }).await;
     }
 
     pub async fn process_packets(&self) -> bool {
@@ -156,13 +144,11 @@ impl Client {
                 match self.connection_state.load() {
                     ConnectionState::Login => {
                         if id == CLoginSuccess::PACKET_ID.latest_id {
-                            log::info!("Logged In (LoginSuccess).");
                             self.connection_state.store(ConnectionState::Config);
                         }
                     }
                     ConnectionState::Config => {
                         if id == CFinishConfig::PACKET_ID.latest_id {
-                            log::info!("Config Acknowledged.");
                             self.send_packet(&SAcknowledgeFinishConfig {}).await;
                             self.connection_state.store(ConnectionState::Play);
                         }
@@ -173,7 +159,6 @@ impl Client {
                         } else if id == CPlayerPosition::PACKET_ID.latest_id {
                             if !self.is_loaded.load(Ordering::Relaxed) {
                                 self.is_loaded.store(true, Ordering::Relaxed);
-                                log::info!("Spawned into world.");
                             }
                         }
                     }
@@ -181,17 +166,16 @@ impl Client {
                 }
                 true
             }
-            Ok(None) => false,
-            Err(_) => false,
+            _ => false,
         }
     }
 
-    pub async fn tick(&self, args: &Args) {
+    pub async fn tick_config(&self, config: &crate::BotConfig) {
         if self.connection_state.load() != ConnectionState::Play || !self.is_loaded.load(Ordering::Relaxed) {
             return;
         }
-        if args.enable_rotation { self.tick_rotation().await; }
-        if args.enable_swing { self.tick_swing().await; }
+        if config.enable_rotation { self.tick_rotation().await; }
+        if config.enable_swing { self.tick_swing().await; }
         if self.afk_active.load(Ordering::Relaxed) { self.tick_movement().await; }
     }
 
@@ -209,7 +193,7 @@ impl Client {
         } else {
             let np = (progress + 0.1).min(1.0);
             self.move_progress.store(np);
-            let t = 3.0 * np.powi(2) - 2.0 * np.powi(3); // Cubic easing
+            let t = 3.0 * np.powi(2) - 2.0 * np.powi(3);
             let nz = self.start_z.load() + (self.target_z.load() - self.start_z.load()) * t as f64;
             self.current_z.store(nz);
             self.send_packet(&SPlayerPosition {
