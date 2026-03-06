@@ -1,60 +1,48 @@
-<div align="center">
+ BotMark v0.1.1 — Persistent AFK & Remote Control
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-![Current version)](https://img.shields.io/badge/current_version-1.21.11-blue)
 
-A tool to stress test Minecraft servers by simulating numerous bot connections, helping identify performance bottlenecks and stability issues.
-![Screenshot_20250223_154536](https://github.com/user-attachments/assets/b1379060-e375-44dc-95a3-91f1f2fb52dd)
-
-</div>
-
-### How to Run
-
-1.  **Disable Online Mode & Encryption:** Ensure that `online-mode=false` in your server's `server.properties` file. This is crucial for Botmark to connect as it simulates offline-mode clients. **(Warning: only do this in a test environment)**.
-2.  **Run Botmark:** Use the following command in your terminal, adjusting the arguments as needed:
-
-    ```bash
-    ./botmark --ip <ip:port> --count <bot-count> [OPTIONS]
-    ```
-
-### Command-Line Arguments
-
-Here's a detailed breakdown of all available command-line arguments:
-
-- **`--ip <ip:port>` (Required):**
-
-  - The IP address and port of the Minecraft server to stress test.
-  - Example: `127.0.0.1:25565` or `example.com:25565`
-
-- **`-c, --count <bot-count>` (Optional, Default: `1`):**
-
-  - The number of bots to simulate connecting to the server.
-  - Example: `--count 50`
-
-- **`-d, --delay <delay>` (Optional, Default: `200`):**
-  - The delay (in milliseconds) between each bot connection.
-  - Example: `--delay 100` (100 milliseconds delay)
-
-- **`-t, --timeout <delay>` (Optional, Default: `5000`):**
-  - The timeout (in milliseconds) for each bot connection.
-  - Example: `--delay 500` (500 milliseconds delay)
-  
-- **`--spam_message "<message>"` (Optional, Default: `Please do not spam!`):**
-  - Will send a Chat message with the specified `spam_message_delay`.
-  - Example: `--spam_message "Hello, I'm a Robot"`
-
-- **`--spam_message_delay_min <delay>` (Optional, Default: `150`):**
-  - The minimal delay (in milliseconds) between spam message.
-  - Example: `--spam_message_delay_min 100` (100 milliseconds delay)
-- **`--spam_message_delay_max <delay>` (Optional, Default: `350`):**
-  - The maximal delay (in milliseconds) between spam message.
-  - Example: `--spam_message_delay_max 100` (100 milliseconds delay)
-- **`--spam_message_delay_max <delay>` (Optional, Default: `350`):**
-  - The maximal delay (in milliseconds) between spam message.
-  - Example: `--spam_message_delay_max 100` (100 milliseconds delay)
-- **`--enable_rotation <false/true>` (Optional, Default: `true`):**
-  - Enable random head rotations.
-  - Example: `--enable_rotation true`
-- **`--enable_swing <false/true>` (Optional, Default: `true`):**
-  - Enable random arm swings.
-  - Example: `--enable_swing true`
+A high-performance, low-level Rust Minecraft bot built for 24/7 AFK farming on Render.
+Includes a real-time web dashboard with WASD controls and remote command execution.
+🌟 Features
+24/7 Render Hosting: Built-in tiny_http server to satisfy Render’s health checks and prevent service sleeping.
+Advanced Anti-AFK: Uses Cubic Easing (
+) for "jitter" movement, making bot activity look human to anti-cheats.
+Remote Control Dashboard: Modern dark-mode UI with:
+WASD Buttons: Move the bot manually from your browser.
+Command Bar: Execute slash commands or send chat messages remotely.
+AFK Toggle: Enable or disable jitter movement instantly.
+Cracked Server Support: Skips Mojang authentication for instant connection to offline-mode servers.
+Low-Level Efficiency: Built on the Pumpkin protocol for minimal RAM and CPU usage.
+🚀 How to Deploy (Render)
+Environment Variables: In your Render Web Service settings, add the following:
+MC_SERVER: The IP and Port (e.g., play.server.com:25565).
+MC_USER: Your desired bot username.
+PORT: 10000
+Build Settings:
+Build Command: cargo build --release
+Start Command: ./target/release/botmark
+🧠 Code Breakdown: How it Works
+1. The Async Heart (main.rs)
+lookup_host: Automatically resolves domain names to IPs.
+tokio::select!: Manages three simultaneous tasks:
+Web Dashboard: Listens for your clicks and commands.
+Packet Reader: Decodes incoming server data (KeepAlives, Spawns).
+Bot Ticker: Runs the movement and rotation logic every 50ms.
+2. The Protocol Logic (client.rs)
+ConnectionState: A state machine that moves from Handshake ➔ Login ➔ Config ➔ Play.
+send_packet: Manually serializes Rust structs into raw Minecraft hex data.
+process_packets:
+KeepAlive: Automatically sends a response to the server to prevent "Timed Out" kicks.
+CPlayerPosition: Syncs the bot's coordinates when the server teleports it.
+3. The Movement Engine (tick_movement)
+Atomic State: Uses crossbeam atomics so the Web Dashboard and the Bot Loop can share coordinates safely without lagging.
+Cubic Easing: Instead of teleporting, the bot calculates a smooth curve between two points, simulating a player slightly shifting their weight or moving back and forth.
+Rotation & Swing: Periodically sends SPlayerRotation and SSwingArm packets to ensure the server sees constant, non-static activity.
+4. The Web Dashboard (start_web_dashboard)
+Action Handling: When you click "W", the dashboard sends an HTTP request to the bot. The bot intercepts this, calculates the new Z coordinate, and pushes a SPlayerPosition packet to Minecraft.
+Command Injection: Takes your text input, URI-decodes it, and wraps it into a SChatCommand packet with a valid 1.21.1 BitSet acknowledgment.
+🛠️ Dependencies
+pumpkin-protocol: Low-level Minecraft packet handling.
+tokio: The async runtime for handling networking and web traffic.
+tiny_http: A lightweight, synchronous web server for the dashboard.
+crossbeam: Ultra-fast atomic variables for thread-safe positioning.
