@@ -1,23 +1,13 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration, sync::atomic::Ordering};
-use clap::Parser;
 use client::Client;
-use tokio::{net::TcpStream, time::timeout};
+use tokio::{net::{TcpStream, lookup_host}, time::timeout};
 use tiny_http::{Server, Response, Header};
 
 mod client;
 
-#[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
-pub struct Args {
-    #[arg(long)]
-    pub ip: String,
-    #[arg(long, default_value = "BotMark")]
-    pub username: String,
-    #[arg(short, long, default_value_t = 5000)]
-    pub timeout: u64,
-    #[arg(long, default_value_t = true)]
+// We'll use this struct internally to pass settings to the ticker
+pub struct BotConfig {
     pub enable_rotation: bool,
-    #[arg(long, default_value_t = true)]
     pub enable_swing: bool,
 }
 
@@ -31,7 +21,6 @@ async fn start_web_dashboard(bot: Arc<Client>) {
         for request in server.incoming_requests() {
             let url = request.url();
             
-            // 1. Handle WASD & Toggles
             if url.starts_with("/action") {
                 let action = url.split("type=").last().unwrap_or("");
                 let b = bot.clone();
@@ -42,7 +31,7 @@ async fn start_web_dashboard(bot: Arc<Client>) {
                         "S" => b.send_chat_or_cmd("/move back").await,
                         "D" => b.send_chat_or_cmd("/move right").await,
                         "toggle_afk" => {
-                            let current = b.afk_active_val(); // Helper to read atomic
+                            let current = b.afk_active_val();
                             b.set_afk(!current);
                         },
                         _ => {}
@@ -50,7 +39,6 @@ async fn start_web_dashboard(bot: Arc<Client>) {
                 });
             }
 
-            // 2. Handle Command Bar
             if url.starts_with("/cmd?msg=") {
                 let msg = url.split("msg=").last().unwrap_or("");
                 let decoded = urlencoding::decode(msg).unwrap_or_default().into_owned();
@@ -60,7 +48,6 @@ async fn start_web_dashboard(bot: Arc<Client>) {
                 }
             }
 
-            // 3. Serve UI
             let html = r#"
             <!DOCTYPE html>
             <html>
@@ -97,7 +84,7 @@ async fn start_web_dashboard(bot: Arc<Client>) {
                         <button onclick="const i=document.getElementById('m'); fetch('/cmd?msg='+encodeURIComponent(i.value)); i.value='';">SEND</button>
                     </div>
                 </div>
-                <p style="font-size: 10px; color: #444; margin-top: 20px;">CONNECTED TO MC SERVER via RENDER</p>
+                <p style="font-size: 10px; color: #444; margin-top: 20px;">CONTROL PANEL ACTIVE</p>
             </body>
             </html>
             "#;
@@ -112,46 +99,48 @@ async fn start_web_dashboard(bot: Arc<Client>) {
 #[tokio::main]
 async fn main() {
     simple_logger::init_with_level(log::Level::Info).unwrap();
-    let args = Arc::new(Args::parse());
-    let address = args.ip.parse::<SocketAddr>().expect("Invalid IP:Port");
 
-    log::info!("Establishing connection to {}...", address);
+    // Pull from Environment Variables (Set these in Render!)
+    let server_raw = std::env::var("MC_SERVER").unwrap_or_else(|_| "127.0.0.1:25565".to_string());
+    let username = std::env::var("MC_USER").unwrap_or_else(|_| "BotMark".to_string());
     
-    let stream = match timeout(Duration::from_millis(args.timeout), TcpStream::connect(address)).await {
+    // Resolve DNS (converts mc.server.com to IP)
+    log::info!("Resolving {}...", server_raw);
+    let address = lookup_host(&server_raw).await
+        .expect("Failed to resolve server address")
+        .next()
+        .expect("No IP address found for host");
+
+    log::info!("Connecting to {} as {}...", address, username);
+    
+    let stream = match timeout(Duration::from_secs(10), TcpStream::connect(address)).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => { log::error!("Connection error: {}", e); return; }
         Err(_) => { log::error!("Connection timed out"); return; }
     };
 
     let client = Arc::new(Client::new(stream));
+    let config = Arc::new(BotConfig { enable_rotation: true, enable_swing: true });
     
-    // Start UI first so Render detects the service is "Live"
     start_web_dashboard(client.clone()).await;
+    client.join_server(address, username).await;
 
-    // Join Server (Cracked/Offline mode supported)
-    client.join_server(address, args.username.clone()).await;
-
-    // Packet Processing Task
     let reader_bot = client.clone();
     let reader_task = tokio::spawn(async move {
-        loop {
-            if !reader_bot.process_packets().await { break; }
-        }
+        loop { if !reader_bot.process_packets().await { break; } }
     });
 
-    // Bot Tick Task (Movement/Anti-AFK)
     let ticker_bot = client.clone();
-    let ticker_args = args.clone();
     let ticker_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(50));
         loop {
             interval.tick().await;
-            ticker_bot.tick(&ticker_args).await;
+            ticker_bot.tick_config(&config).await;
         }
     });
 
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => log::info!("Shutdown initiated."),
+        _ = tokio::signal::ctrl_c() => log::info!("Shutdown."),
         _ = reader_task => log::error!("Network failure."),
     }
 }
