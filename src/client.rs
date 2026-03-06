@@ -32,7 +32,7 @@ pub struct Client {
     entity_id: AtomicI32,
     is_loaded: AtomicBool,
     swing_cooldown: AtomicU32,
-    afk_active: AtomicBool,
+    pub afk_active: AtomicBool,
     // Position
     current_x: AtomicCell<f64>, current_y: AtomicCell<f64>, current_z: AtomicCell<f64>,
     start_z: AtomicCell<f64>, target_z: AtomicCell<f64>,
@@ -66,6 +66,11 @@ impl Client {
         }
     }
 
+    /// Helper for dashboard status in main.rs
+    pub fn afk_active_val(&self) -> bool {
+        self.afk_active.load(Ordering::Relaxed)
+    }
+
     pub fn set_afk(&self, active: bool) {
         self.afk_active.store(active, Ordering::SeqCst);
         if active { self.move_cooldown.store(0, Ordering::Relaxed); }
@@ -80,8 +85,30 @@ impl Client {
         let _ = self.network_writer.lock().await.write_packet(buf.into()).await;
     }
 
-    /// Dashboard logic: Sends a command or chat message
+    /// Processes commands or movement actions from the web dashboard
     pub async fn send_chat_or_cmd(&self, input: &str) {
+        // Direct WASD movement logic
+        if input.starts_with("/move ") {
+            let dir = input.strip_prefix("/move ").unwrap();
+            let mut x = self.current_x.load();
+            let mut z = self.current_z.load();
+            match dir {
+                "forward" => z += 0.5,
+                "back" => z -= 0.5,
+                "left" => x -= 0.5,
+                "right" => x += 0.5,
+                _ => {}
+            }
+            self.current_x.store(x);
+            self.current_z.store(z);
+            self.send_packet(&SPlayerPosition {
+                position: Vector3::new(x, self.current_y.load(), z),
+                collision: 1,
+            }).await;
+            return;
+        }
+
+        // Standard Chat or Commands
         if input.starts_with('/') {
             let cmd = input.strip_prefix('/').unwrap_or(input);
             self.send_packet(&SChatCommand {
@@ -90,9 +117,9 @@ impl Client {
                 salt: 0,
                 argument_signatures: Vec::new(),
                 message_count: VarInt(0),
-                acknowledgments: vec![0u8; 3].into(), // Fixed-size bitset for 1.21.1
+                acknowledgments: vec![0u8; 3].into(), 
             }).await;
-            log::info!("Executed Dashboard Command: /{}", cmd);
+            log::info!("Dashboard CMD: /{}", cmd);
         } else {
             self.send_packet(&SChatMessage {
                 message: input.to_string(),
@@ -102,7 +129,7 @@ impl Client {
                 message_count: VarInt(0),
                 acknowledgments: vec![0u8; 3].into(),
             }).await;
-            log::info!("Sent Dashboard Chat: {}", input);
+            log::info!("Dashboard Chat: {}", input);
         }
     }
 
@@ -129,25 +156,24 @@ impl Client {
                 match self.connection_state.load() {
                     ConnectionState::Login => {
                         if id == CLoginSuccess::PACKET_ID.latest_id {
-                            log::info!("Login Success! Moving to Config state.");
+                            log::info!("Logged In (LoginSuccess).");
                             self.connection_state.store(ConnectionState::Config);
                         }
                     }
                     ConnectionState::Config => {
                         if id == CFinishConfig::PACKET_ID.latest_id {
-                            log::info!("Config Finished! Moving to Play state.");
+                            log::info!("Config Acknowledged.");
                             self.send_packet(&SAcknowledgeFinishConfig {}).await;
                             self.connection_state.store(ConnectionState::Play);
                         }
                     }
                     ConnectionState::Play => {
                         if id == CKeepAlive::PACKET_ID.latest_id {
-                            // Respond with 0 to keep connection alive
                             self.send_packet(&SKeepAlive { keep_alive_id: 0 }).await;
                         } else if id == CPlayerPosition::PACKET_ID.latest_id {
                             if !self.is_loaded.load(Ordering::Relaxed) {
                                 self.is_loaded.store(true, Ordering::Relaxed);
-                                log::info!("Bot spawned into world.");
+                                log::info!("Spawned into world.");
                             }
                         }
                     }
@@ -183,7 +209,7 @@ impl Client {
         } else {
             let np = (progress + 0.1).min(1.0);
             self.move_progress.store(np);
-            let t = 3.0 * np.powi(2) - 2.0 * np.powi(3);
+            let t = 3.0 * np.powi(2) - 2.0 * np.powi(3); // Cubic easing
             let nz = self.start_z.load() + (self.target_z.load() - self.start_z.load()) * t as f64;
             self.current_z.store(nz);
             self.send_packet(&SPlayerPosition {
@@ -205,7 +231,6 @@ impl Client {
         if progress >= 1.0 {
             if self.rotation_cooldown.fetch_sub(1, Ordering::Relaxed) <= 1 {
                 self.start_yaw.store(self.current_yaw.load());
-                // Randomly rotate within a small range to simulate activity
                 self.target_yaw.store(self.current_yaw.load() + 10.0);
                 self.rotation_progress.store(0.0);
                 self.rotation_cooldown.store(200, Ordering::Relaxed);
