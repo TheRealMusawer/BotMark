@@ -10,7 +10,7 @@ use pumpkin_protocol::java::server::config::SAcknowledgeFinishConfig;
 use pumpkin_protocol::java::server::handshake::SHandShake;
 use pumpkin_protocol::java::server::login::SLoginStart;
 use pumpkin_protocol::java::server::play::{
-    SKeepAlive, SPlayerPosition, SPlayerRotation, SSwingArm, SChatCommand, SChatMessage,
+    SKeepAlive, SPlayerPosition, SPlayerRotation, SSwingArm,
 };
 use pumpkin_protocol::ser::NetworkWriteExt;
 use pumpkin_protocol::{ClientPacket, ConnectionState};
@@ -84,11 +84,13 @@ impl Client {
         let mut buf = Vec::new();
         let mut writer = &mut buf;
         let _ = writer.write_var_int(&VarInt(P::PACKET_ID.latest_id));
-        packet.write_packet_data(writer, &MinecraftVersion::V_1_21_1).unwrap();
+        // Use a valid MinecraftVersion variant for the Pumpkin version you have
+        packet.write_packet_data(writer, &MinecraftVersion::V_1_11_1).unwrap();
         let _ = self.network_writer.lock().await.write_packet(buf.into()).await;
     }
 
     pub async fn send_chat_or_cmd(&self, input: &str) {
+        // Movement via dashboard (/move ...)
         if input.starts_with("/move ") {
             let dir = input.strip_prefix("/move ").unwrap();
             let mut x = self.current_x.load();
@@ -109,20 +111,8 @@ impl Client {
             return;
         }
 
-        if input.starts_with('/') {
-            let cmd = input.strip_prefix('/').unwrap_or(input);
-            self.send_packet(&SChatCommand {
-                command: cmd.to_string(),
-                // new API: only acknowledged bitset
-                acknowledged: vec![0u8; 3].into(),
-            }).await;
-        } else {
-            self.send_packet(&SChatMessage {
-                message: input.to_string(),
-                // new API: only acknowledged bitset
-                acknowledged: vec![0u8; 3].into(),
-            }).await;
-        }
+        // For now, just log other input instead of sending chat/commands
+        log::info!("Chat/command sending disabled in this build: {}", input);
     }
 
     pub async fn join_server(&self, addr: SocketAddr, username: String) {
@@ -130,7 +120,6 @@ impl Client {
             protocol_version: VarInt(CURRENT_MC_PROTOCOL as i32),
             server_address: addr.ip().to_string(),
             server_port: addr.port(),
-            // new API: ConnectionState instead of VarInt
             next_state: ConnectionState::Login,
         }).await;
         self.connection_state.store(ConnectionState::Login);
@@ -142,7 +131,7 @@ impl Client {
 
     pub async fn process_packets(&self) -> bool {
         let mut reader = self.network_reader.lock().await;
-        match reader.next_packet().await {
+        match reader.read_packet().await {
             Ok(Some(raw)) => {
                 let id = raw.id.0;
                 match self.connection_state.load() {
@@ -239,7 +228,6 @@ impl Client {
             self.send_packet(&SPlayerRotation {
                 yaw: nyaw,
                 pitch: self.current_pitch.load(),
-                // new API: `ground` instead of `collision`
                 ground: true,
             }).await;
         }
