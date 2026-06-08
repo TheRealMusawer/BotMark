@@ -9,9 +9,13 @@ use pumpkin_protocol::java::packet_encoder::TCPNetworkEncoder;
 use pumpkin_protocol::java::server::config::SAcknowledgeFinishConfig;
 use pumpkin_protocol::java::server::handshake::SHandShake;
 use pumpkin_protocol::java::server::login::SLoginStart;
-use pumpkin_protocol::java::server::play::{SKeepAlive, SPlayerPosition, SPlayerRotation, SSwingArm, SChatCommand, SChatMessage};
+use pumpkin_protocol::java::server::play::{
+    SKeepAlive, SPlayerPosition, SPlayerRotation, SSwingArm, SChatCommand, SChatMessage,
+};
 use pumpkin_protocol::ser::NetworkWriteExt;
-use pumpkin_protocol::{ClientPacket, ConnectionState, MinecraftVersion};
+use pumpkin_protocol::{ClientPacket, ConnectionState};
+use pumpkin_protocol::packet::MultiVersionJavaPacket;
+use pumpkin_util::version::MinecraftVersion;
 use pumpkin_util::math::vector3::Vector3;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -70,7 +74,9 @@ impl Client {
 
     pub fn set_afk(&self, active: bool) {
         self.afk_active.store(active, Ordering::SeqCst);
-        if active { self.move_cooldown.store(0, Ordering::Relaxed); }
+        if active {
+            self.move_cooldown.store(0, Ordering::Relaxed);
+        }
         log::info!("AFK Mode toggled to: {}", active);
     }
 
@@ -107,20 +113,14 @@ impl Client {
             let cmd = input.strip_prefix('/').unwrap_or(input);
             self.send_packet(&SChatCommand {
                 command: cmd.to_string(),
-                timestamp: 0,
-                salt: 0,
-                argument_signatures: Vec::new(),
-                message_count: VarInt(0),
-                acknowledgments: vec![0u8; 3].into(), 
+                // new API: only acknowledged bitset
+                acknowledged: vec![0u8; 3].into(),
             }).await;
         } else {
             self.send_packet(&SChatMessage {
                 message: input.to_string(),
-                timestamp: 0,
-                salt: 0,
-                signature: None,
-                message_count: VarInt(0),
-                acknowledgments: vec![0u8; 3].into(),
+                // new API: only acknowledged bitset
+                acknowledged: vec![0u8; 3].into(),
             }).await;
         }
     }
@@ -130,15 +130,19 @@ impl Client {
             protocol_version: VarInt(CURRENT_MC_PROTOCOL as i32),
             server_address: addr.ip().to_string(),
             server_port: addr.port(),
-            next_state: VarInt(2), 
+            // new API: ConnectionState instead of VarInt
+            next_state: ConnectionState::Login,
         }).await;
         self.connection_state.store(ConnectionState::Login);
-        self.send_packet(&SLoginStart { name: username, uuid: Uuid::new_v4() }).await;
+        self.send_packet(&SLoginStart {
+            name: username,
+            uuid: Uuid::new_v4(),
+        }).await;
     }
 
     pub async fn process_packets(&self) -> bool {
         let mut reader = self.network_reader.lock().await;
-        match reader.read_packet().await {
+        match reader.next_packet().await {
             Ok(Some(raw)) => {
                 let id = raw.id.0;
                 match self.connection_state.load() {
@@ -174,9 +178,15 @@ impl Client {
         if self.connection_state.load() != ConnectionState::Play || !self.is_loaded.load(Ordering::Relaxed) {
             return;
         }
-        if config.enable_rotation { self.tick_rotation().await; }
-        if config.enable_swing { self.tick_swing().await; }
-        if self.afk_active.load(Ordering::Relaxed) { self.tick_movement().await; }
+        if config.enable_rotation {
+            self.tick_rotation().await;
+        }
+        if config.enable_swing {
+            self.tick_swing().await;
+        }
+        if self.afk_active.load(Ordering::Relaxed) {
+            self.tick_movement().await;
+        }
     }
 
     async fn tick_movement(&self) {
@@ -185,7 +195,8 @@ impl Client {
             if self.move_cooldown.fetch_sub(1, Ordering::Relaxed) <= 1 {
                 let cz = self.current_z.load();
                 self.start_z.store(cz);
-                let target = if (self.target_z.load() - cz).abs() < 0.1 { cz + 0.5 } else { cz - 0.5 };
+                let target =
+                    if (self.target_z.load() - cz).abs() < 0.1 { cz + 0.5 } else { cz - 0.5 };
                 self.target_z.store(target);
                 self.move_progress.store(0.0);
                 self.move_cooldown.store(100, Ordering::Relaxed);
@@ -198,7 +209,7 @@ impl Client {
             self.current_z.store(nz);
             self.send_packet(&SPlayerPosition {
                 position: Vector3::new(self.current_x.load(), self.current_y.load(), nz),
-                collision: 1, 
+                collision: 1,
             }).await;
         }
     }
@@ -222,12 +233,14 @@ impl Client {
         } else {
             let np = (progress + 0.05).min(1.0);
             self.rotation_progress.store(np);
-            let nyaw = self.start_yaw.load() + (self.target_yaw.load() - self.start_yaw.load()) * np;
+            let nyaw =
+                self.start_yaw.load() + (self.target_yaw.load() - self.start_yaw.load()) * np;
             self.current_yaw.store(nyaw);
             self.send_packet(&SPlayerRotation {
                 yaw: nyaw,
                 pitch: self.current_pitch.load(),
-                collision: 1,
+                // new API: `ground` instead of `collision`
+                ground: true,
             }).await;
         }
     }
